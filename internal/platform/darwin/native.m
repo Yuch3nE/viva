@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "native.h"
+#include "main_menu_darwin.h"
 
 static uint64_t viva_process_start_ticks;
 static uint64_t viva_gpu_submission_count;
@@ -423,6 +424,7 @@ extern int vivaAccessibilityAction(
 extern int vivaShortcutEvent(
     uintptr_t callbackHandle,
     void *view,
+    int key,
     int modifiers,
     int repeat,
     const unsigned char *utf8,
@@ -896,11 +898,44 @@ static NSRange viva_clamp_range(NSRange range, NSUInteger length) {
 // drawing here reaches the same cache.
 extern viva_text_line *vivaShapedLine(const unsigned char *utf8, size_t length, double size, double weight);
 
+// viva_interface_family is the family viva_text_set_family last named, "" for the
+// system font. A plain C buffer, not an NSString: nothing here manages memory for
+// the interface font, and the name is read under the shaping the engine serializes.
+static char viva_interface_family[256] = "";
+
 // viva_system_font is the proportional font that measurement, labels and the editor all
-// use (a retained CTFont). It is an NSFont, which is a CTFont already.
+// use (a retained CTFont). It is an NSFont, which is a CTFont already. With a family
+// named, its face of that family at the weight stands in for the system font; a family
+// the system does not have falls back to the system font, as AppKit does for a name.
 static CTFontRef viva_system_font(CGFloat size, CGFloat weight) {
+    if (viva_interface_family[0] != '\0') {
+        NSString *family = [NSString stringWithUTF8String:viva_interface_family];
+        if (family != nil) {
+            // The weight is the system font's own continuous scale (NSFontWeight), so a
+            // family's regular, medium, semibold and bold faces are told apart as they are
+            // in the system font; the nearest face the family has stands in for one it
+            // lacks. NSFontManager's weight is a 0-15 table that cannot say medium.
+            NSFontDescriptor *descriptor = [NSFontDescriptor fontDescriptorWithFontAttributes:@{
+                NSFontFamilyAttribute: family,
+                NSFontTraitsAttribute: @{NSFontWeightTrait: @(weight)},
+            }];
+            NSFont *named = [NSFont fontWithDescriptor:descriptor size:size];
+            if (named != nil) {
+                return (CTFontRef)CFRetain(named);
+            }
+        }
+    }
     NSFont *font = [NSFont systemFontOfSize:size weight:weight];
     return font != nil ? (CTFontRef)CFRetain(font) : NULL;
+}
+
+void viva_text_set_family(const char *family) {
+    if (family == NULL) {
+        viva_interface_family[0] = '\0';
+        return;
+    }
+    strncpy(viva_interface_family, family, sizeof(viva_interface_family) - 1);
+    viva_interface_family[sizeof(viva_interface_family) - 1] = '\0';
 }
 
 viva_text_line *viva_text_line_create(const unsigned char *utf8, size_t length, double font_size, double font_weight) {
@@ -1240,6 +1275,58 @@ static void viva_mono_face_traits(int face, NSString **family, BOOL *classic, NS
     }
 }
 
+// viva_mono_font_on_a_grid reports whether the font advances every printable ASCII
+// character by the same width: the one property a terminal cell grid needs.
+//
+// The font's own fixed-pitch bit is not enough to ask. Families built for coding
+// (Nerd Font patches, ligature builds) often leave it clear while drawing on a grid
+// all the same, and the bit alone kept them out of the list. The advances are
+// compared with a percent of the cell to spare, because a grid font still rounds a
+// glyph by a hair (Roboto Mono for Powerline gives '-' 7.207 where its cell is
+// 7.201) while a proportional font's differ by a fraction of the cell.
+static BOOL viva_mono_font_on_a_grid(NSFont *font) {
+    if (font.isFixedPitch) {
+        return YES;
+    }
+    enum { first = 0x20, last = 0x7E, count = last - first + 1 };
+    UniChar characters[count];
+    CGGlyph glyphs[count];
+    CGSize advances[count];
+    for (CFIndex index = 0; index < count; index++) {
+        characters[index] = (UniChar)(first + index);
+    }
+    CTFontRef ctFont = (CTFontRef)font;
+    if (!CTFontGetGlyphsForCharacters(ctFont, characters, glyphs, count)) {
+        return NO; // it cannot draw one of them, so it is no terminal face
+    }
+    CTFontGetAdvancesForGlyphs(ctFont, kCTFontOrientationHorizontal, glyphs, advances, count);
+    CGFloat cell = advances[0].width;
+    if (cell <= 0.0) {
+        return NO;
+    }
+    for (CFIndex index = 1; index < count; index++) {
+        if (fabs(advances[index].width - cell) > cell * 0.01) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
+char *viva_list_font_families(void) {
+    @autoreleasepool {
+        NSFontManager *manager = [NSFontManager sharedFontManager];
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (NSString *family in [manager availableFontFamilies]) {
+            if ([family hasPrefix:@"."]) {
+                continue;
+            }
+            [names addObject:family];
+        }
+        [names sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+        return strdup([[names componentsJoinedByString:@"\n"] UTF8String]);
+    }
+}
+
 char *viva_list_mono_families(void) {
     @autoreleasepool {
         NSFontManager *manager = [NSFontManager sharedFontManager];
@@ -1249,7 +1336,7 @@ char *viva_list_mono_families(void) {
                 continue;
             }
             NSFont *font = [manager fontWithFamily:family traits:0 weight:5 size:12];
-            if (font != nil && font.isFixedPitch) {
+            if (font != nil && viva_mono_font_on_a_grid(font)) {
                 [names addObject:family];
             }
         }
@@ -1338,7 +1425,7 @@ static NSFont *viva_mono_font(CGFloat size, CGFloat weight, int face) {
 #define VIVA_MONO_CLUSTER_LENGTH 64
 
 typedef struct {
-    BOOL fixedPitch;
+    BOOL onGrid;
     BOOL includesHan;
     int privateUse;
 } viva_mono_family_traits;
@@ -1466,8 +1553,10 @@ static int viva_mono_private_use(CTFontRef font) {
     return count;
 }
 
-// viva_mono_family_traits_of is what ranks a family: its pitch, whether it draws
-// Han, and how much private-use it covers. Read once per family.
+// viva_mono_family_traits_of is what ranks a family: whether it draws on a grid (the
+// same test that decides which families are offered, so a coding family that leaves
+// the fixed-pitch bit clear ranks with the ones that set it), whether it draws Han,
+// and how much private-use it covers. Read once per family.
 static viva_mono_family_traits viva_mono_family_traits_of(NSString *family) {
     viva_mono_family_traits traits = {NO, YES, 0};
     @synchronized(viva_mono_fallback_lock()) {
@@ -1479,7 +1568,7 @@ static viva_mono_family_traits viva_mono_family_traits_of(NSString *family) {
     }
     NSFont *font = viva_mono_family_font(family, 12, 0);
     if (font != nil) {
-        traits.fixedPitch = font.isFixedPitch;
+        traits.onGrid = viva_mono_font_on_a_grid(font);
         traits.includesHan = viva_mono_draws_han((CTFontRef)font);
         traits.privateUse = viva_mono_private_use((CTFontRef)font);
     }
@@ -1499,8 +1588,8 @@ static BOOL viva_mono_family_better(viva_mono_family_traits candidate, NSString 
     if (bestFamily == nil) {
         return YES;
     }
-    if (candidate.fixedPitch != best.fixedPitch) {
-        return candidate.fixedPitch;
+    if (candidate.onGrid != best.onGrid) {
+        return candidate.onGrid;
     }
     if (candidate.includesHan != best.includesHan) {
         return !candidate.includesHan;
@@ -2115,6 +2204,7 @@ static uint64_t viva_label_content_hash(viva_text_label config) {
     uint32_t contentFlags = config.flags & ~VIVA_LABEL_CLIPPED;
     hash = viva_hash_bytes(hash, &contentFlags, sizeof(contentFlags));
     hash = viva_hash_bytes(hash, &config.mono_face, sizeof(config.mono_face));
+    hash = viva_hash_bytes(hash, &config.font_generation, sizeof(config.font_generation));
     if (config.runs != NULL) {
         hash = viva_hash_bytes(hash, config.runs, config.run_count * sizeof(viva_text_run));
     }
@@ -2149,6 +2239,7 @@ static uint64_t viva_label_content_hash(viva_text_label config) {
     CGFloat _originX;  // where the text starts within the frame, logical pixels
     CGFloat _originY;
     uint64_t _hash;
+    uint32_t _fontGeneration; // the interface font generation the picture was made in
     BOOL _mono;
     int _monoFace;
     CGFloat _cellWidth;
@@ -2278,6 +2369,7 @@ static BOOL viva_bitmap_extent_stale(size_t have, size_t need) {
         _originX = viva_quantized_origin(config.origin_x);
         _originY = viva_quantized_origin(config.origin_y);
         _hash = viva_label_content_hash(config);
+        _fontGeneration = config.font_generation;
         _mono = (config.flags & VIVA_LABEL_MONO) != 0;
         _monoFace = config.mono_face;
         _cellWidth = config.cell_width;
@@ -2336,7 +2428,7 @@ static BOOL viva_bitmap_extent_stale(size_t have, size_t need) {
     // Content identity: font, color, and text. Position never matters (the
     // quad supplies it each draw); size matters only for texel alignment,
     // which live resize may temporarily relax.
-    if (_fontSize != config.font_size || _fontWeight != config.font_weight) {
+    if (_fontSize != config.font_size || _fontWeight != config.font_weight || _fontGeneration != config.font_generation) {
         return NO;
     }
     if (_originX != viva_quantized_origin(config.origin_x) || _originY != viva_quantized_origin(config.origin_y)) {
@@ -3852,10 +3944,24 @@ static int viva_navigation_command(SEL selector) {
 			if (text.length > 0 && vivaShortcutEvent(
 					_callbackHandle,
 					self,
+					0,
 					viva_modifier_flags(event.modifierFlags),
 					event.isARepeat ? 1 : 0,
 					text.bytes,
 					text.length)) {
+				return;
+			}
+		} else if (named == VIVA_KEY_ENTER) {
+			/* Control or Command with Return: a multiline field would make it a
+			 * line break, so the application is offered it first. */
+			if (vivaShortcutEvent(
+					_callbackHandle,
+					self,
+					named,
+					viva_modifier_flags(event.modifierFlags),
+					event.isARepeat ? 1 : 0,
+					NULL,
+					0)) {
 				return;
 			}
 		}
@@ -5757,22 +5863,6 @@ static void viva_set_secure_event_input(BOOL on) {
 }
 
 @end
-
-static void viva_install_main_menu(NSString *applicationName) {
-    NSMenu *menuBar = [[[NSMenu alloc] init] autorelease];
-    NSMenuItem *applicationItem = [[[NSMenuItem alloc] init] autorelease];
-    [menuBar addItem:applicationItem];
-    NSApp.mainMenu = menuBar;
-
-    NSMenu *applicationMenu = [[[NSMenu alloc] init] autorelease];
-    NSString *quitTitle = [@"Quit " stringByAppendingString:applicationName];
-    NSMenuItem *quitItem = [[[NSMenuItem alloc]
-        initWithTitle:quitTitle
-               action:@selector(terminate:)
-        keyEquivalent:@"q"] autorelease];
-    [applicationMenu addItem:quitItem];
-    applicationItem.submenu = applicationMenu;
-}
 
 static NSMutableArray<VivaAppDelegate *> *viva_application_windows;
 static int viva_application_status;

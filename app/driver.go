@@ -109,6 +109,7 @@ func NewDriver(config Config, canvas *ui.Canvas) (*Driver, error) {
 	}
 	driver.painter.setClipboardText = func(value string) { driver.clipboard, driver.system.clipboardImage = value, nil }
 	driver.painter.setCursor = func(Cursor) error { return nil }
+	driver.painter.setCursorImage = func(*ui.CursorImage) error { return nil }
 	driver.painter.scheduleFrame = func(delay time.Duration) {
 		due := driver.now + delay
 		if !driver.animating || due < driver.frameDue {
@@ -550,6 +551,16 @@ func (driver *Driver) Key(key ui.Key, modifiers ui.Modifiers) error {
 		return err
 	}
 	modifiers |= driver.heldModifiers()
+	if key == ui.KeyEnter && modifiers&(ui.ModifierControl|ui.ModifierMeta) != 0 {
+		// As on a window: Control+Enter is offered to the application before the
+		// text system, which would make a line break of it.
+		event := platform.KeyEvent{Key: input.KeyEnter, Modifiers: input.Modifiers(modifiers)}
+		if platform.ShortcutCandidate(event) {
+			if _, handled, err := driver.painter.shortcut(event); err != nil || handled {
+				return err
+			}
+		}
+	}
 	if driver.terminal() {
 		return driver.terminalKey(key, modifiers, "")
 	}
@@ -900,6 +911,9 @@ type Label struct {
 	Weight           float32
 	Color            ui.Color
 	Layer            uint16
+	// FontGeneration is platform.TextLabel's: the interface font the text was laid out
+	// in, 0 for text that does not follow it.
+	FontGeneration uint32
 	// Mono, MonoFace, CellWidth and Runs describe a fixed-pitch grid line (see
 	// ui.Canvas.LabelRuns); Runs is empty for an ordinary label.
 	Mono      bool
@@ -963,7 +977,9 @@ type Snapshot struct {
 	Focused ui.ID
 	Hovered ui.ID
 	Cursor  Cursor
-	Now     time.Duration
+	// CursorImage is the picture shown as the pointer while Cursor is CursorImage.
+	CursorImage *ui.CursorImage
+	Now         time.Duration
 }
 
 // TextRuns returns the runs of one of the snapshot's Texts.
@@ -985,7 +1001,7 @@ func (driver *Driver) Snapshot() Snapshot {
 		Runs:    append([]ui.TextRun(nil), painter.canvas.AllTextRuns()...),
 		Hits:    append([]ui.Hit(nil), painter.canvas.Hits()...),
 		Tree:    painter.canvas.Tree(),
-		Focused: painter.focused, Hovered: painter.hovered, Cursor: painter.cursor, Now: driver.now,
+		Focused: painter.focused, Hovered: painter.hovered, Cursor: painter.cursor, CursorImage: painter.cursorImage, Now: driver.now,
 	}
 	for _, rectangle := range painter.renderer.Rectangles() {
 		primitive := Primitive{
@@ -1023,8 +1039,8 @@ func (driver *Driver) Snapshot() Snapshot {
 			OriginX: label.OriginX, OriginY: label.OriginY,
 			FontSize: label.FontSize, Weight: label.Weight,
 			Color: ui.Color{Red: float32(label.Color.Red), Green: float32(label.Color.Green), Blue: float32(label.Color.Blue), Alpha: float32(label.Color.Alpha)},
-			Layer: label.Layer,
-			Mono:  label.Mono, MonoFace: label.MonoFace, CellWidth: label.CellWidth, Runs: append([]ui.TextRun(nil), label.Runs...),
+			Layer: label.Layer, FontGeneration: label.FontGeneration,
+			Mono: label.Mono, MonoFace: label.MonoFace, CellWidth: label.CellWidth, Runs: append([]ui.TextRun(nil), label.Runs...),
 			Clip: label.Clip, Clipped: label.Clipped,
 			BitmapWidth: label.BitmapWidth, BitmapHeight: label.BitmapHeight, BitmapStride: label.BitmapStride,
 			BitmapID: label.BitmapID, BitmapVersion: label.BitmapVersion,

@@ -89,6 +89,10 @@ type windowState struct {
 	textDragAnchor                         int
 	textInput                              platform.TextInput
 	textEnabled, caretVisible, focused     bool
+	// shortcuts says the application wants the system's shortcuts while the window is focused
+	// (any goroutine sets it); shortcutsHeld says this window's share of the hook is installed.
+	shortcuts                              atomic.Bool
+	shortcutsHeld                          bool
 	caretTimer                             uintptr
 	baseRectangleCount, baseTextLabelCount int
 	textLabels                             []platform.TextLabel
@@ -371,6 +375,7 @@ func windowProc(window, kind, first, second uintptr) (result uintptr) {
 		if state != nil {
 			state.window = window
 			windowStates.Store(window, state)
+			listenToClipboard(window) // a window opened after OnClipboardChange joins the watch
 		}
 	} else if value, ok := windowStates.Load(window); ok {
 		state = value.(*windowState)
@@ -393,13 +398,21 @@ func windowProc(window, kind, first, second uintptr) (result uintptr) {
 		state.constrainTracking((*minMaxInfo)(pointer(second)))
 		return 0
 	case wmDestroy:
+		state.shortcuts.Store(false)
+		state.syncShortcutHook()
 		state.destroyed(window)
+		return 0
+	case wmCaptureShortcuts:
+		state.syncShortcutHook()
 		return 0
 	case wmAllowClose:
 		destroyWindow.Call(window)
 		return 0
 	case wmApplyAppearance:
 		state.settingsChanged()
+		return 0
+	case wmClipboardUpdate:
+		notifyClipboardChange()
 		return 0
 	case wmHideWindow:
 		showWindow.Call(window, swHide)
@@ -470,6 +483,7 @@ func windowProc(window, kind, first, second uintptr) (result uintptr) {
 		}
 	case wmSetFocus:
 		state.focused = true
+		state.syncShortcutHook()
 		state.setCaretVisible(true)
 		if err := state.restartCaretTimer(); err != nil {
 			state.fail(err)
@@ -682,6 +696,7 @@ func windowProc(window, kind, first, second uintptr) (result uintptr) {
 		state.captionPress.end()
 		if kind == wmKillFocus {
 			state.focused = false
+			state.syncShortcutHook()
 			state.textDragging = false
 			state.stopCaretTimer()
 			state.focusLost()
@@ -814,6 +829,7 @@ func (state *windowState) frameWithText(frame platform.Frame, err error, nativeV
 // message loop running with no window to show, and the single-instance claim held
 // by a process nobody can see.
 func (state *windowState) destroyed(window uintptr) {
+	forgetClipboardListener(window)
 	released := false
 	release := func() {
 		if released {

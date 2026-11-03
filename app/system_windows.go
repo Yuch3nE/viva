@@ -23,6 +23,10 @@ func nativePreferredLanguages() []string { return windowsplatform.PreferredLangu
 func nativeSetClipboardText(value string) error {
 	return windowsplatform.SetClipboardText(value)
 }
+
+func nativeOnClipboardChange(notify func()) error {
+	return windowsplatform.OnClipboardChange(notify)
+}
 func nativeSetCursor(cursor Cursor) error {
 	return windowsplatform.SetCursorShape(uint8(cursor))
 }
@@ -89,6 +93,7 @@ func nativeEnableCrashDumps(relativeDir string) (string, error) {
 func nativeShowFatalError(title, message string) { windowsplatform.ShowFatalError(title, message) }
 
 func nativeMonospaceFamilies() []string { return windowsplatform.MonospaceFamilies() }
+func nativeFontFamilies() []string      { return windowsplatform.FontFamilies() }
 
 func nativeAppearance() Appearance { return appearanceOf(windowsplatform.DarkAppearance()) }
 
@@ -96,4 +101,8 @@ func nativeWatchAppearance() {} // the window procedure hears the settings chang
 
 func nativeSetAppearance(appearance Appearance) {
 	windowsplatform.SetAppearance(appearance == AppearanceLight, appearance == AppearanceDark)
+}
+
+func nativeSetCursorImage(image *ui.CursorImage) error {
+	return windowsplatform.SetCursorImage(image)
 }

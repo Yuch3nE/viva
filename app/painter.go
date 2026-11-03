@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -71,11 +72,15 @@ type painter struct {
 	paintedScratch  []ui.ID // the next paint's IDs, so one pass can read the old ones
 	lastTexts       []ui.Text
 	lastRuns        []ui.TextRun // the runs lastTexts refer to, copied out of the application's memory
-	lastImages      []ui.Image
-	views           []platform.NativeView // the native views of this publish
-	lastViews       []platform.NativeView // the ones last sent
-	covers          []ui.Rect             // backing of the views' Covers
-	stateBySlot     []instanceState
+	// lastFontGeneration is the canvas's font generation at the labels last sent: text
+	// that has not changed still needs sending when the fonts have, so the renderer
+	// draws it again.
+	lastFontGeneration uint32
+	lastImages         []ui.Image
+	views              []platform.NativeView // the native views of this publish
+	lastViews          []platform.NativeView // the ones last sent
+	covers             []ui.Rect             // backing of the views' Covers
+	stateBySlot        []instanceState
 	// layerShift is 1 while the frame has a backdrop, which takes platform layer
 	// zero; every canvas layer then travels one higher. It is 0 otherwise.
 	layerShift uint16
@@ -131,6 +136,9 @@ type painter struct {
 	scheduleFrame    func(delay time.Duration)
 	setClipboardText func(string)
 	setCursor        func(Cursor) error
+	setCursorImage   func(*ui.CursorImage) error
+	// cursorImage is the picture shown while cursor is CursorImage.
+	cursorImage *ui.CursorImage
 }
 
 func newPainter(canvas *ui.Canvas, config *Config) (*painter, error) {
@@ -993,31 +1001,54 @@ func (painter *painter) syncCursor() error {
 		target = painter.pressTarget
 	}
 	next := CursorArrow
+	var image *ui.CursorImage
 	if painter.edge != platform.EdgeNone && painter.pressTarget.IsZero() {
-		return painter.applyCursor(cursorForEdge(painter.edge))
+		return painter.applyCursor(cursorForEdge(painter.edge), nil)
 	}
 	if !target.IsZero() {
 		hits := painter.canvas.Hits()
 		for index := len(hits) - 1; index >= 0; index-- {
 			if hits[index].ID == target && !hits[index].Disabled && !hits[index].IsLabel {
 				next = cursorFromHit(hits[index].Cursor)
+				if next == CursorImage {
+					if image = hits[index].CursorImage; image == nil {
+						next = CursorArrow
+					}
+				}
 				break
 			}
 		}
 	}
-	return painter.applyCursor(next)
+	return painter.applyCursor(next, image)
 }
 
-func (painter *painter) applyCursor(next Cursor) error {
-	if next == painter.cursor {
+// applyCursor makes next the pointer, with image as its picture when it is CursorImage. A picture
+// is one pointer by identity, so the same value is not set again.
+func (painter *painter) applyCursor(next Cursor, image *ui.CursorImage) error {
+	if next == painter.cursor && image == painter.cursorImage {
 		return nil
 	}
-	if painter.setCursor != nil {
+	if next == CursorImage {
+		if painter.setCursorImage != nil {
+			if err := painter.setCursorImage(image); err != nil {
+				if !errors.Is(err, ErrUnsupported) {
+					return err
+				}
+				// A target that cannot show the picture keeps the arrow; the picture is not
+				// asked for again until it changes.
+				if painter.setCursor != nil {
+					if err := painter.setCursor(CursorArrow); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	} else if painter.setCursor != nil {
 		if err := painter.setCursor(next); err != nil {
 			return err
 		}
 	}
-	painter.cursor = next
+	painter.cursor, painter.cursorImage = next, image
 	return nil
 }
 
@@ -1041,6 +1072,10 @@ func cursorFromHit(cursor ui.PointerCursor) Cursor {
 		return CursorResizeNESW
 	case ui.PointerCursorNotAllowed:
 		return CursorNotAllowed
+	case ui.PointerCursorHidden:
+		return CursorHidden
+	case ui.PointerCursorImage:
+		return CursorImage
 	default:
 		return CursorArrow
 	}
@@ -2034,6 +2069,7 @@ func (painter *painter) syncLabels() {
 			BitmapUpload: index >= len(painter.lastImages) || !sameImageBitmap(image, painter.lastImages[index]),
 		})
 	}
+	fontGeneration := painter.canvas.FontGeneration()
 	for _, label := range texts {
 		width := roundPixel(label.Bounds.Width)
 		height := roundPixel(label.Bounds.Height)
@@ -2054,6 +2090,10 @@ func (painter *painter) syncLabels() {
 			},
 			Layer: painter.platformLayer(label.Layer),
 			Mono:  label.Style.Mono, MonoFace: label.Style.MonoFace, CellWidth: label.CellWidth, Runs: painter.canvas.TextRuns(label),
+		}
+		if !label.Style.Mono && label.RunCount == 0 {
+			// Only text in the interface font follows its generation.
+			entry.FontGeneration = fontGeneration
 		}
 		if label.RunCount > 0 {
 			// The font does not draw Block Elements; appendBlockElements did.
@@ -2243,7 +2283,7 @@ func (painter *painter) platformLayer(layer uint16) uint16 {
 // sameAsLastTexts reports whether the texts to draw are exactly those last
 // sent to the platform.
 func (painter *painter) sameAsLastContent() bool {
-	if !sameImages(painter.clippedImages, painter.lastImages) {
+	if painter.canvas.FontGeneration() != painter.lastFontGeneration || !sameImages(painter.clippedImages, painter.lastImages) {
 		return false
 	}
 	left, right := painter.clippedTexts, painter.lastTexts
@@ -2323,6 +2363,7 @@ func sameAccessibility(left, right []platform.AccessibilityNode) bool {
 // saveTexts remembers this frame's texts for the next comparison. Their runs
 // live in the canvas, which is rewritten by the next paint, so they are copied.
 func (painter *painter) saveContent() {
+	painter.lastFontGeneration = painter.canvas.FontGeneration()
 	painter.lastImages = append(painter.lastImages[:0], painter.clippedImages...)
 	painter.lastTexts = append(painter.lastTexts[:0], painter.clippedTexts...)
 	painter.lastRuns = painter.lastRuns[:0]

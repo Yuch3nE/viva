@@ -23,12 +23,20 @@ func nativeTextEngine() ui.TextEngine { return darwinplatform.SharedTextEngine()
 
 func nativePreferredLanguages() []string { return darwinplatform.PreferredLanguages() }
 
+func nativeOnClipboardChange(notify func()) error {
+	return darwinplatform.OnClipboardChange(notify)
+}
+
 func nativeSetClipboardText(value string) error {
 	return darwinplatform.SetClipboardText(value)
 }
 
 func nativeSetCursor(cursor Cursor) error {
 	return darwinplatform.SetCursorShape(uint8(cursor))
+}
+
+func nativeSetCursorImage(image *ui.CursorImage) error {
+	return darwinplatform.SetCursorImage(image)
 }
 
 func nativeOpenFiles(options OpenFileOptions) ([]string, error) {
@@ -103,6 +111,7 @@ func nativeEnableCrashDumps(string) (string, error) { return "", ErrUnsupported 
 func nativeShowFatalError(title, message string) { darwinplatform.ShowFatalError(title, message) }
 
 func nativeMonospaceFamilies() []string { return darwinplatform.MonospaceFamilies() }
+func nativeFontFamilies() []string      { return darwinplatform.FontFamilies() }
 
 func nativeAppearance() Appearance {
 	if darwinplatform.DarkAppearance() {

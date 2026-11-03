@@ -15,7 +15,9 @@ func nativeClipboardText() (string, error)                     { return "", ErrU
 func nativeSetClipboardText(string) error                      { return ErrUnsupported }
 func nativeHasClipboardImage() bool                            { return false }
 func nativeClipboardImagePNG() ([]byte, error)                 { return nil, ErrUnsupported }
+func nativeOnClipboardChange(func()) error                     { return ErrUnsupported }
 func nativeSetCursor(Cursor) error                             { return ErrUnsupported }
+func nativeSetCursorImage(*ui.CursorImage) error               { return ErrUnsupported }
 func nativeOpenFiles(OpenFileOptions) ([]string, error)        { return nil, ErrUnsupported }
 func nativeOpenDirectory(OpenDirectoryOptions) (string, error) { return "", ErrUnsupported }
 func nativeSaveFile(SaveFileOptions) (string, error)           { return "", ErrUnsupported }
@@ -31,6 +33,7 @@ func nativeEnableCrashDumps(string) (string, error) { return "", ErrUnsupported 
 func nativeShowFatalError(string, string) {}
 
 func nativeMonospaceFamilies() []string { return nil }
+func nativeFontFamilies() []string      { return nil }
 
 func nativeAppearance() Appearance { return AppearanceUnknown }
 
