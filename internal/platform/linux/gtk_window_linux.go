@@ -45,10 +45,11 @@ type gtkWindow struct {
 	allocated0    bool
 	cairoSurface  uintptr
 
-	frame     atomic.Pointer[ui.Rect]
-	maximized bool
-	minimized bool
-	focused   bool
+	frame      atomic.Pointer[ui.Rect]
+	maximized  bool
+	fullscreen atomic.Bool
+	minimized  bool
+	focused    bool
 
 	regionsDirty bool
 	// dragging and dropping follow a drag of files over the window.
@@ -210,6 +211,7 @@ func (a *gtkApplication) OpenWindow(config platform.Config) (platform.Window, er
 	}
 	a.windows[w.id] = w
 	a.atspiOpened(w)
+	a.retryDesktopWatch()
 	w.viewRects = append(w.viewRects, config.NativeViews...)
 	if config.Web != nil && config.Web.Ready != nil {
 		a.enqueue(func() {
@@ -262,8 +264,24 @@ func (w *gtkWindow) Hide() {
 		if !w.closed {
 			w.g.widgetHide(w.toplevel)
 		}
+
 	})
 }
+
+func (w *gtkWindow) SetFullscreen(fullscreen bool) error {
+	w.app.enqueue(func() {
+		if !w.closed {
+			if fullscreen {
+				w.g.windowFullscreen(w.toplevel)
+			} else {
+				w.g.windowUnfullscreen(w.toplevel)
+			}
+		}
+	})
+	return nil
+}
+
+func (w *gtkWindow) Fullscreen() bool { return w.fullscreen.Load() }
 
 func (w *gtkWindow) Show() {
 	w.app.enqueue(func() {
@@ -433,6 +451,7 @@ func (w *gtkWindow) allocated(widget uintptr, x, y, width, height int32) {
 	if w.closed || width <= 0 || height <= 0 {
 		return
 	}
+	w.syncFullscreen()
 	logicalWidth, logicalHeight := float32(width)/w.ratio, float32(height)/w.ratio
 	if w.wl != nil {
 		w.wl.positioned(x, y)
@@ -606,6 +625,7 @@ func (w *gtkWindow) reportFrame() {
 	if w.app.wayland || w.closed {
 		return
 	}
+	w.syncFullscreen()
 
 	window := w.g.widgetGetWindow(w.area)
 	if window == 0 {
@@ -618,7 +638,7 @@ func (w *gtkWindow) reportFrame() {
 		return
 	}
 	w.frame.Store(&frame)
-	if w.config.OnFrameChange != nil && !w.maximized {
+	if w.config.OnFrameChange != nil && !w.maximized && !w.fullscreen.Load() {
 		w.config.OnFrameChange(frame)
 	}
 }
